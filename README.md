@@ -36,6 +36,8 @@ flowchart LR
     erp -.->|"IDs, status, rejeicoes"| hub
 ```
 
+
+
 ### 2) Containers Internos da Camada HUBVENDAS
 
 ```mermaid
@@ -67,6 +69,8 @@ flowchart TB
     retry --> audit
 ```
 
+
+
 ### 3) Topologia Logica de Mensageria (RabbitMQ)
 
 ```mermaid
@@ -74,17 +78,22 @@ flowchart LR
     prod["Produtores\n(Sistema Turismo / HUB Inbound)"]
     ex["Exchange principal\n(vendas.titulos.exchange)"]
 
-    q1["Fila BU01..BU10\n(particionamento logico)"]
-    q2["Fila prioritaria\n(criticidade alta)"]
-    q3["Fila padrao\n(criticidade normal)"]
+    q1["Fila de Pedido de Venda"]
+    q2["Fila de Lancamento Financeiro"]
+    q3["Fila de Baixa Financeira"]
+    prio["Priorizacao por tipo de evento"]
     dlx["Dead Letter Exchange"]
     dlq["Dead Letter Queue"]
     consumer["Workers HUBVENDAS"]
 
     prod --> ex
-    ex -->|"routing key por BU"| q1
-    ex -->|"routing key prioridade"| q2
-    ex -->|"fallback"| q3
+    ex -->|"evento: pedido_venda"| q1
+    ex -->|"evento: lancamento_financeiro"| q2
+    ex -->|"evento: baixa_financeira"| q3
+    ex --> prio
+    prio --> q1
+    prio --> q2
+    prio --> q3
     q1 --> consumer
     q2 --> consumer
     q3 --> consumer
@@ -93,6 +102,8 @@ flowchart LR
     q3 -->|"falha apos N tentativas"| dlx
     dlx --> dlq
 ```
+
+
 
 ## Diagrama Comportamental (Mermaid)
 
@@ -136,6 +147,8 @@ sequenceDiagram
     O-->>T: Notificacao obrigatoria de retorno (status final)
 ```
 
+
+
 ## Conceitos de Mensageria
 
 - **Fila de trabalho:** fila principal onde as transacoes validas aguardam processamento assincrono.
@@ -146,25 +159,44 @@ sequenceDiagram
 
 ## Decisoes e Ajustes de Modelagem
 
-A especificacao traz alguns pontos em aberto. Para viabilizar uma representacao arquitetural coerente e renderizavel em Mermaid, foram adotados os ajustes abaixo:
+A especificacao traz alguns pontos em aberto. Para viabilizar uma representacao arquitetural coerente e renderizavel em Mermaid, e incorporar os ajustes solicitados, foram adotadas as definicoes abaixo:
 
-1. **Topologia de filas representada como hibrida (BU + criticidade):**
-   como a especificacao lista a topologia como lacuna, o diagrama mostra uma alternativa que combina roteamento por BU e por prioridade para refletir escalabilidade e controle operacional.
-
+1. **Topologia de filas organizada por sequencia e tipo de evento:**
+  as filas serao organizadas na sequencia da integracao: primeiro **pedido de venda**, depois **lancamento financeiro** e, em seguida, **baixa do lancamento financeiro**, com priorizacao por tipo de evento para garantir escalabilidade operacional.
 2. **Conector de ERP modelado com stage intermediario:**
-   foi explicitado no fluxo que o HUB envia para um stage do ERP e que um job interno do ERP conclui a distribuicao aos modulos, alinhado ao texto da especificacao.
-
+  foi explicitado no fluxo que o HUB envia para um stage do ERP e que um job interno do ERP conclui a distribuicao aos modulos, alinhado ao texto da especificacao.
 3. **OAuth2 representado como responsabilidade do ERP:**
-   o fluxo de autenticacao para chamadas da integracao ao ERP foi modelado como servico OAuth2 gerenciado pelo proprio ERP, deixando explicita essa fronteira de responsabilidade.
-
+  o fluxo de autenticacao para chamadas da integracao ao ERP foi modelado como servico OAuth2 gerenciado pelo proprio ERP, deixando explicita essa fronteira de responsabilidade.
 4. **Feedback para sistema de origem definido como obrigatorio:**
-   a notificacao de retorno foi modelada como etapa obrigatoria ao final do processamento, garantindo visibilidade de status para o sistema de origem.
-
+  a notificacao de retorno foi modelada como etapa obrigatoria ao final do processamento, garantindo visibilidade de status para o sistema de origem.
 5. **Containers internos organizados por responsabilidade (nao por tecnologia):**
-   os componentes internos da camada foram definidos por capacidades (auth, orquestracao, regras BU, idempotencia, retry, auditoria) para manter aderencia ao nivel logico pedido.
-
+  os componentes internos da camada foram definidos por capacidades (auth, orquestracao, regras BU, idempotencia, retry, auditoria) para manter aderencia ao nivel logico pedido.
 6. **DLQ e retentativas separadas no comportamento:**
-   a jornada critica explicita falha transiente versus falha definitiva para evidenciar resiliencia, sem fixar politicas numericas ainda nao definidas.
+  a jornada critica explicita falha transiente versus falha definitiva para evidenciar resiliencia, sem fixar politicas numericas ainda nao definidas.
+
+## Diretrizes para Implementacao por Agentes
+
+Este repositorio deve ser tratado como base de contexto arquitetural para futuras implementacoes. Toda evolucao deve manter aderencia aos pontos abaixo:
+
+- **Fluxo funcional obrigatorio:** pedido de venda -> lancamento financeiro -> baixa financeira.
+- **Mensageria por evento:** roteamento e priorizacao por tipo de evento, com capacidade de expansao sem limite estrutural fixo de BUs.
+- **Assincronia obrigatoria:** persistencias criticas no ERP passam pelo controle de filas e workers.
+- **Resiliencia:** implementar retry, backoff, DLQ e reprocessamento com rastreabilidade.
+- **Idempotencia:** impedir duplicidade em cenarios de reenvio/reprocessamento.
+- **Seguranca:** chamadas da integracao para o ERP com OAuth2 gerenciado pelo ERP; trafego restrito ao perimetro VPN.
+- **Feedback de retorno:** notificacao de status final ao sistema de origem e obrigatoria.
+- **Separacao de responsabilidades:** regras de negocio por BU concentradas na camada de integracao (ACL), evitando acoplamento no front-office e no ERP.
+
+## Checklist de Aderencia Arquitetural
+
+Antes de aprovar qualquer implementacao, validar:
+
+- o fluxo completo da jornada critica esta preservado;
+- os quatro diagramas deste README ainda representam o comportamento real;
+- nao existe atalho sincrono direto para persistencia critica no ERP fora do fluxo de filas;
+- o mecanismo de notificacao de retorno obrigatorio esta implementado ponta a ponta;
+- erros nao recuperaveis sao direcionados para DLQ com dados para reprocessamento;
+- autenticacao outbound para ERP segue o modelo OAuth2 sob responsabilidade do ERP.
 
 ## Fonte da Especificacao
 
